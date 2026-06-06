@@ -1,0 +1,29 @@
+[
+  {
+    "model": "GigaChat-2-Lite",
+    "type": "Слабая (Lite)",
+    "avg_time": 0.6345272064208984,
+    "avg_tokens": 101.0,
+    "answers": [
+      "1,10"
+    ]
+  },
+  {
+    "model": "GigaChat-2-Pro",
+    "type": "Средняя (Pro)",
+    "avg_time": 0.6057782173156738,
+    "avg_tokens": 100.0,
+    "answers": [
+      "1,6"
+    ]
+  },
+  {
+    "model": "GigaChat-2-Max",
+    "type": "Сильная (Max)",
+    "avg_time": 1.0642685890197754,
+    "avg_tokens": 100.0,
+    "answers": [
+      "1,7"
+    ]
+  }
+]
