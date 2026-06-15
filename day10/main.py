@@ -338,7 +338,7 @@ class GigaChatAgentWithStrategies:
 
         # Текущая стратегия
         self.current_strategy: ContextStrategy = ContextStrategy.SLIDING_WINDOW
-        self.sliding_window = SlidingWindowStrategy(window_size=8)
+        self.sliding_window = SlidingWindowStrategy(window_size=4)
         self.sticky_facts = StickyFactsStrategy(window_size=5)
         self.branching = BranchingStrategy(window_size=20)
 
@@ -714,208 +714,199 @@ class StrategyTester:
             bar = "█" * bar_len + "░" * (30 - bar_len)
             print(f"   {name:<15}: {bar} {data['total_tokens']:,} токенов")
 
-
     def run_branching_test(self) -> Dict:
-        """Тест стратегии ветвления - создаём две ветки от checkpoint после 4 сообщений"""
+        """Тест стратегии ветвления"""
         print(f"\n{'=' * 70}")
-        print(f"🧪 ТЕСТИРОВАНИЕ: BRANCHING (реальное ветвление)")
+        print(f"🧪 ТЕСТИРОВАНИЕ: BRANCHING")
         print(f"{'=' * 70}")
 
         agent = GigaChatAgentWithStrategies(self.auth_key)
         agent.switch_strategy(ContextStrategy.BRANCHING)
 
         scenario = self.get_tz_scenario()
-        results = {
-            "branch_main": [],
-            "branch_a": [],
-            "branch_b": [],
-            "checkpoint_name": "decision_point"
-        }
 
-        # ========== ЧАСТЬ 1: ОБЩИЙ ДИАЛОГ (первые 4 сообщения) ==========
+        # Хранилища для данных
+        branch_main = []
+        branch_a = []
+        branch_b = []
+        branch_a_memory = []
+        branch_b_memory = []
+
+        total_tokens = 0
+        total_cost = 0
+
+        # ========== ЧАСТЬ 1: ОБЩИЙ ДИАЛОГ (4 сообщения) ==========
         print("\n📌 ОБЩИЙ ДИАЛОГ (первые 4 сообщения):")
-        print("-" * 50)
 
         for i in range(4):
-            print(f"\n📝 Шаг {i + 1}: {scenario[i]}")
+            print(f"\n📝 {scenario[i][:80]}...")
             answer, stats = agent.ask(scenario[i])
-            print(f"🤖 {answer[:200]}...")
-            results["branch_main"].append({
+            print(f"🤖 {answer[:150]}...")
+
+            msg_data = {
                 "step": i + 1,
                 "question": scenario[i],
-                "answer": answer[:200]
-            })
+                "answer": answer[:200],
+                "tokens": stats.get("actual_paid_tokens", 0),
+                "cost": stats.get("cost_this", 0)
+            }
+            branch_main.append(msg_data)
+            total_tokens += msg_data["tokens"]
+            total_cost += msg_data["cost"]
 
-        # Создаём checkpoint после 4 сообщений
+        # Создаём checkpoint
+        agent.create_checkpoint("decision_point")
+        print(f"\n📌 Checkpoint 'decision_point' создан после 4 сообщений")
+
+        # ========== ЧАСТЬ 2: ВЕТКА A ==========
         print("\n" + "=" * 50)
-        checkpoint_result = agent.create_checkpoint("decision_point")
-        print(f"📌 {checkpoint_result}")
+        print("🌿 ВЕТКА A: Премиум решение")
 
-        # Сохраняем текущие факты/состояние для отладки
-        current_stats = agent.get_strategy_stats()
-        print(
-            f"📊 Текущее состояние: {current_stats.get('facts', current_stats.get('current_messages', 0))} фактов/сообщений")
-
-        # ========== ЧАСТЬ 2: ВЕТКА A - ПРЕМИУМ ВАРИАНТ ==========
-        print("\n" + "=" * 50)
-        print("🌿 ВЕТКА A: Премиум решение (большой бюджет, быстрый срок)")
-        print("=" * 50)
-
-        # Создаём и переключаемся на ветку A
         agent.switch_branch("main")
         agent.create_branch("decision_point", "premium_branch")
         agent.switch_branch("premium_branch")
 
         premium_questions = [
-            "А что если мы увеличим бюджет до 1.2 миллионов рублей? Сможете ускорить разработку до 1 месяца?",
-            "Отлично! Тогда добавьте ещё интеграцию с 1С и систему аналитики PowerBI.",
-            "Какую скидку вы можете предложить при бюджете 1.5 миллиона?",
-            "И последнее: нужен ли будет дополнительный техподдержка после запуска?"
+            "А что если увеличить бюджет до 1.2 млн рублей? Сможете ускорить до 1 месяца?",
+            "Тогда добавьте интеграцию с 1С и PowerBI.",
+            "Какую скидку при бюджете 1.5 млн?",
+            "Нужна ли техподдержка после запуска?",
+            "Какой стек технологий используете?",
+            "Сколько разработчиков будет?",
+            "Как часто будут демонстрации?",
+            "Предоставляете ли гарантию?",
+            "Как передаются права на код?",
+            "Время реакции на критические ошибки?",
+            "Обучите ли наших сотрудников?"
         ]
 
         for i, q in enumerate(premium_questions):
-            print(f"\n📝 Ветка A (премиум) шаг {i + 1}: {q[:80]}...")
+            print(f"\n📝 Ветка A: {q[:80]}...")
             answer, stats = agent.ask(q)
-            print(f"🤖 {answer[:200]}...")
-            results["branch_a"].append({
+            print(f"🤖 {answer[:150]}...")
+
+            msg_data = {
                 "step": i + 1,
                 "question": q,
                 "answer": answer[:200],
-                "tokens": stats.get("actual_paid_tokens", 0)
-            })
+                "tokens": stats.get("actual_paid_tokens", 0),
+                "cost": stats.get("cost_this", 0)
+            }
+            branch_a.append(msg_data)
+            total_tokens += msg_data["tokens"]
+            total_cost += msg_data["cost"]
 
-        # ========== ЧАСТЬ 3: ВЕТКА B - ЭКОНОМ ВАРИАНТ ==========
+        # ========== ЧАСТЬ 3: ВЕТКА B ==========
         print("\n" + "=" * 50)
-        print("🌿 ВЕТКА B: Эконом решение (малый бюджет, длительный срок)")
-        print("=" * 50)
+        print("🌿 ВЕТКА B: Эконом решение")
 
-        # Создаём и переключаемся на ветку B
         agent.switch_branch("main")
         agent.create_branch("decision_point", "economy_branch")
         agent.switch_branch("economy_branch")
 
         economy_questions = [
-            "А если уменьшить бюджет до 300 тысяч рублей? Какие функции придётся урезать?",
-            "Понял. Сколько времени займёт разработка при таком бюджете?",
-            "Можем ли мы сделать MVP сначала, а остальное добавить позже?",
-            "Какой минимальный бюджет для базовой версии без интеграций?"
+            "А если бюджет 300 тыс. рублей? Какие функции урезать?",
+            "Сколько времени займёт разработка?",
+            "Можем сделать MVP сначала?",
+            "Какой минимальный бюджет для базовой версии?",
+            "Какой стек технологий при ограниченном бюджете?",
+            "Сколько разработчиков в эконом-варианте?",
+            "Как часто будут демонстрации?",
+            "Гарантия для эконом-решения?",
+            "Передача прав в эконом-варианте?",
+            "Время реакции на ошибки?",
+            "Обучение или только документация?"
         ]
 
         for i, q in enumerate(economy_questions):
-            print(f"\n📝 Ветка B (эконом) шаг {i + 1}: {q[:80]}...")
+            print(f"\n📝 Ветка B: {q[:80]}...")
             answer, stats = agent.ask(q)
-            print(f"🤖 {answer[:200]}...")
-            results["branch_b"].append({
+            print(f"🤖 {answer[:150]}...")
+
+            msg_data = {
                 "step": i + 1,
                 "question": q,
                 "answer": answer[:200],
-                "tokens": stats.get("actual_paid_tokens", 0)
-            })
+                "tokens": stats.get("actual_paid_tokens", 0),
+                "cost": stats.get("cost_this", 0)
+            }
+            branch_b.append(msg_data)
+            total_tokens += msg_data["tokens"]
+            total_cost += msg_data["cost"]
 
-        # ========== ЧАСТЬ 4: ПРОВЕРКА НЕЗАВИСИМОСТИ ВЕТОК ==========
-        print("\n" + "=" * 70)
-        print("🔄 ПРОВЕРКА НЕЗАВИСИМОСТИ ВЕТОК (переключение и проверка памяти)")
-        print("=" * 70)
-
-        memory_checks = []
+        # ========== ЧАСТЬ 4: ПРОВЕРКА ПАМЯТИ ==========
+        print("\n" + "=" * 50)
+        print("🔄 ПРОВЕРКА ПАМЯТИ ВЕТОК")
 
         # Проверка ветки A
-        print("\n📌 Переключаемся на ВЕТКУ A (premium_branch)")
         agent.switch_branch("premium_branch")
+        print("\n📌 Ветка A (премиум):")
 
-        test_questions_a = [
-            "Какой у нас бюджет в этой ветке?",
-            "Какой срок разработки мы обсуждали?",
-            "Какие дополнительные интеграции я просил добавить?"
+        memory_questions_a = [
+            ("Какой у нас бюджет?", "1.2"),
+            ("Какой срок разработки?", "месяц"),
+            ("Какие интеграции добавляем?", "1С"),
+            ("Сколько разработчиков?", "разработчик"),
+            ("Какой стек технологий?", "python")
         ]
 
-        branch_a_memory = []
-        for q in test_questions_a:
-            answer, stats = agent.ask(q)
-            remembered = any([
-                "1.2" in answer or "1200000" in answer or "миллион" in answer,
-                "месяц" in answer,
-                "1С" in answer or "PowerBI" in answer
-            ])
-            branch_a_memory.append({
-                "question": q,
-                "answer": answer[:100],
-                "remembered": remembered
-            })
-            print(f"   {'✅' if remembered else '❌'} {q}")
-            print(f"      {answer[:100]}...")
+        for q, keyword in memory_questions_a:
+            answer, _ = agent.ask(q)
+            remembered = keyword.lower() in answer.lower()
+            branch_a_memory.append({"question": q, "answer": answer[:100], "remembered": remembered})
+            print(f"   {'✅' if remembered else '❌'} {q} -> {answer[:80]}...")
 
         # Проверка ветки B
-        print("\n📌 Переключаемся на ВЕТКУ B (economy_branch)")
         agent.switch_branch("economy_branch")
+        print("\n📌 Ветка B (эконом):")
 
-        test_questions_b = [
-            "Какой у нас бюджет в этой ветке?",
-            "Какие функции мы урезали?",
-            "Что такое MVP и когда мы его получим?"
+        memory_questions_b = [
+            ("Какой у нас бюджет?", "300"),
+            ("Какие функции урезали?", "урез"),
+            ("Что такое MVP?", "MVP"),
+            ("Сколько разработчиков?", "разработчик"),
+            ("Какой стек технологий?", "python")
         ]
 
-        branch_b_memory = []
-        for q in test_questions_b:
-            answer, stats = agent.ask(q)
-            remembered = any([
-                "300" in answer or "300000" in answer,
-                "урез" in answer or "меньше" in answer,
-                "MVP" in answer
-            ])
-            branch_b_memory.append({
-                "question": q,
-                "answer": answer[:100],
-                "remembered": remembered
-            })
-            print(f"   {'✅' if remembered else '❌'} {q}")
-            print(f"      {answer[:100]}...")
+        for q, keyword in memory_questions_b:
+            answer, _ = agent.ask(q)
+            remembered = keyword.lower() in answer.lower()
+            branch_b_memory.append({"question": q, "answer": answer[:100], "remembered": remembered})
+            print(f"   {'✅' if remembered else '❌'} {q} -> {answer[:80]}...")
 
-        # Проверка, что ветки НЕ путаются
-        print("\n📌 Переключаемся обратно на ВЕТКУ A для проверки независимости")
+        # Проверка независимости
+        print("\n📌 Проверка независимости веток:")
         agent.switch_branch("premium_branch")
         answer, _ = agent.ask("У нас бюджет 300 тысяч или 1.2 миллиона?")
-
         is_independent = "1.2" in answer or "миллион" in answer
-        print(f"   {'✅' if is_independent else '❌'} Ветка A помнит свой бюджет (1.2 млн): {answer[:100]}...")
+        print(f"   {'✅' if is_independent else '❌'} Ветка A помнит 1.2 млн: {answer[:80]}...")
 
         agent.switch_branch("economy_branch")
         answer, _ = agent.ask("У нас бюджет 1.2 миллиона или 300 тысяч?")
-
         is_independent_b = "300" in answer or "триста" in answer
-        print(f"   {'✅' if is_independent_b else '❌'} Ветка B помнит свой бюджет (300 тыс): {answer[:100]}...")
+        print(f"   {'✅' if is_independent_b else '❌'} Ветка B помнит 300 тыс: {answer[:80]}...")
 
-        # ========== ЧАСТЬ 5: ФИНАЛЬНАЯ СТАТИСТИКА ==========
-        print("\n" + "=" * 70)
-        print("📊 ФИНАЛЬНАЯ СТАТИСТИКА ВЕТВЛЕНИЯ")
-        print("=" * 70)
+        # Подсчёт качества
+        all_memory = branch_a_memory + branch_b_memory
+        overall_quality = sum(1 for m in all_memory if m["remembered"]) / len(all_memory) if all_memory else 0
 
-        final_stats = agent.branching.get_stats()
-
-        comparison = {
-            "branching": {
-                "branch_a_messages": len(results["branch_a"]),
-                "branch_b_messages": len(results["branch_b"]),
+        # ========== ВОЗВРАТ В ПРАВИЛЬНОМ ФОРМАТЕ ==========
+        return {
+            "strategy": "branching",
+            "steps": branch_main + branch_a + branch_b,
+            "memory_test": all_memory,
+            "total_tokens": total_tokens,  # <-- ОБЯЗАТЕЛЬНО
+            "total_cost": total_cost,  # <-- ОБЯЗАТЕЛЬНО
+            "overall_quality": overall_quality,  # <-- ОБЯЗАТЕЛЬНО
+            "strategy_details": {
+                "branch_a_messages": len(branch_a),
+                "branch_b_messages": len(branch_b),
                 "branch_a_remembered": sum(1 for m in branch_a_memory if m["remembered"]),
                 "branch_b_remembered": sum(1 for m in branch_b_memory if m["remembered"]),
-                "is_independent": is_independent and is_independent_b,
-                "available_branches": final_stats.get("available_branches", []),
-                "checkpoint_used": "decision_point"
+                "is_independent": is_independent and is_independent_b
             }
         }
 
-        print(f"\n🌿 Результаты ветвления:")
-        print(f"   - Ветка A (premium_branch): {len(results['branch_a'])} сообщений")
-        print(f"   - Ветка B (economy_branch): {len(results['branch_b'])} сообщений")
-        print(f"   - Память ветки A: {comparison['branching']['branch_a_remembered']}/3")
-        print(f"   - Память ветки B: {comparison['branching']['branch_b_remembered']}/3")
-        print(f"   - Ветки независимы: {'✅ Да' if is_independent and is_independent_b else '❌ Нет'}")
-
-        results["branching_stats"] = comparison["branching"]
-        results["branch_a_memory"] = branch_a_memory
-        results["branch_b_memory"] = branch_b_memory
-
-        return results
 
 # ============================================================================
 # CLI ИНТЕРФЕЙС
