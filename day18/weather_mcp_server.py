@@ -6,8 +6,11 @@ MCP-сервер для погоды.
 
 import json
 import uuid
+import sqlite3
+import threading
+import time
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field
 
@@ -31,6 +34,10 @@ class WeatherMCPServer:
         self.port = port
         self.sessions: Dict[str, Dict] = {}
         self.tools = self._register_tools()
+        self._init_db()
+        self._monitors: Dict[str, dict] = {}
+        self._monitor_threads: Dict[str, threading.Thread] = {}
+        self._stop_events: Dict[str, threading.Event] = {}
 
     def _register_tools(self) -> List[MCPTool]:
         """
@@ -83,8 +90,134 @@ class WeatherMCPServer:
                     },
                     "required": ["city"]
                 }
+            ),
+            MCPTool(
+                name="start_weather_monitoring",
+                description="Запустить фоновый сбор погоды для города по расписанию. Данные сохраняются в БД.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "city": {
+                            "type": "string",
+                            "description": "Название города"
+                        },
+                        "interval_seconds": {
+                            "type": "integer",
+                            "description": "Интервал сбора в секундах",
+                            "default": 60,
+                            "minimum": 1
+                        },
+                        "units": {
+                            "type": "string",
+                            "enum": ["metric", "imperial"],
+                            "description": "Единицы измерения",
+                            "default": "metric"
+                        }
+                    },
+                    "required": ["city"]
+                }
+            ),
+            MCPTool(
+                name="stop_weather_monitoring",
+                description="Остановить фоновый сбор погоды для указанного города",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "city": {
+                            "type": "string",
+                            "description": "Название города"
+                        }
+                    },
+                    "required": ["city"]
+                }
+            ),
+            MCPTool(
+                name="get_weather_history",
+                description="Получить историю собранных данных о погоде для города",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "city": {
+                            "type": "string",
+                            "description": "Название города (если не указать — вернуть всё)"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Максимум записей",
+                            "default": 100,
+                            "minimum": 1,
+                            "maximum": 1000
+                        }
+                    }
+                }
             )
         ]
+
+    def _init_db(self):
+        self._db_conn = sqlite3.connect("weather_monitor.db", check_same_thread=False)
+        self._db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS weather_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                city TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                temperature REAL,
+                condition TEXT,
+                humidity TEXT,
+                wind_speed REAL,
+                wind_units TEXT,
+                units TEXT,
+                raw_data TEXT
+            )
+        """)
+        self._db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS weather_monitors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                monitor_key TEXT UNIQUE NOT NULL,
+                city TEXT NOT NULL,
+                interval_seconds INTEGER NOT NULL,
+                units TEXT DEFAULT 'metric',
+                active INTEGER DEFAULT 1,
+                created_at TEXT NOT NULL
+            )
+        """)
+        self._db_conn.commit()
+
+    def _save_snapshot(self, city: str, weather: Dict, units: str):
+        temp = None
+        cond = None
+        hum = None
+        ws = None
+        wu = None
+        try:
+            temp = float(weather.get("temperature", {}).get("value", 0))
+        except (TypeError, ValueError):
+            pass
+        cond = weather.get("condition")
+        hum = weather.get("humidity")
+        try:
+            ws = float(weather.get("wind", {}).get("speed", 0))
+        except (TypeError, ValueError):
+            pass
+        wu = weather.get("wind", {}).get("units")
+        self._db_conn.execute(
+            """INSERT INTO weather_snapshots
+               (city, timestamp, temperature, condition, humidity, wind_speed, wind_units, units, raw_data)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (city, datetime.now().isoformat(), temp, cond, hum, ws, wu, units,
+             json.dumps(weather, ensure_ascii=False)),
+        )
+        self._db_conn.commit()
+
+    def _monitor_loop(self, monitor_key: str, city: str, interval: int, units: str):
+        stop_event = self._stop_events.get(monitor_key)
+        while stop_event and not stop_event.is_set():
+            weather = self._get_current_weather(city, units)
+            if "error" not in weather:
+                self._save_snapshot(city, weather, units)
+                print(f"📸 [MONITOR] Snapshot saved for {city} at {datetime.now().isoformat()}")
+            else:
+                print(f"⚠️ [MONITOR] Failed to fetch weather for {city}: {weather['error']}")
+            stop_event.wait(interval)
 
     def _geocode_city(self, city: str) -> Dict:
         """
@@ -426,6 +559,64 @@ class WeatherMCPServer:
         except Exception as e:
             return {"error": f"Неизвестная ошибка: {str(e)}"}
 
+    def _handle_start_monitoring(self, city: str, interval_seconds: int, units: str) -> Dict:
+        key = city.lower().strip()
+        if key in self._monitors:
+            return {"message": f"Мониторинг для {city} уже запущен (интервал: {self._monitors[key]['interval']} сек)"}
+
+        stop_event = threading.Event()
+        self._stop_events[key] = stop_event
+        self._monitors[key] = {"city": city, "interval": interval_seconds, "units": units}
+        t = threading.Thread(target=self._monitor_loop, args=(key, city, interval_seconds, units), daemon=True)
+        self._monitor_threads[key] = t
+        t.start()
+        return {
+            "message": f"Мониторинг погоды для {city} запущен",
+            "city": city,
+            "interval_seconds": interval_seconds,
+            "units": units,
+            "status": "active"
+        }
+
+    def _handle_stop_monitoring(self, city: str) -> Dict:
+        key = city.lower().strip()
+        if key not in self._monitors:
+            return {"error": f"Мониторинг для {city} не найден"}
+        if key in self._stop_events:
+            self._stop_events[key].set()
+        if key in self._monitor_threads:
+            self._monitor_threads[key].join(timeout=5)
+        self._monitors.pop(key, None)
+        self._stop_events.pop(key, None)
+        self._monitor_threads.pop(key, None)
+        return {"message": f"Мониторинг для {city} остановлен", "city": city}
+
+    def _handle_get_history(self, city: Optional[str], limit: int) -> Dict:
+        if city:
+            rows = self._db_conn.execute(
+                "SELECT city, timestamp, temperature, condition, humidity, wind_speed, wind_units "
+                "FROM weather_snapshots WHERE city = ? ORDER BY id DESC LIMIT ?",
+                (city, limit)
+            ).fetchall()
+        else:
+            rows = self._db_conn.execute(
+                "SELECT city, timestamp, temperature, condition, humidity, wind_speed, wind_units "
+                "FROM weather_snapshots ORDER BY id DESC LIMIT ?",
+                (limit,)
+            ).fetchall()
+        snapshots = []
+        for r in rows:
+            snapshots.append({
+                "city": r[0],
+                "timestamp": r[1],
+                "temperature": r[2],
+                "condition": r[3],
+                "humidity": r[4],
+                "wind_speed": r[5],
+                "wind_units": r[6],
+            })
+        return {"snapshots": snapshots, "total": len(snapshots)}
+
     def _handle_tools_list(self, session_id: str, request_id: int) -> Dict:
         """
         Обработка метода tools/list.
@@ -463,6 +654,21 @@ class WeatherMCPServer:
             days = arguments.get("days", 3)
             units = arguments.get("units", "metric")
             result = self._get_weather_forecast(city, days, units)
+
+        elif tool_name == "start_weather_monitoring":
+            city = arguments.get("city")
+            interval = arguments.get("interval_seconds", 60)
+            units = arguments.get("units", "metric")
+            result = self._handle_start_monitoring(city, interval, units)
+
+        elif tool_name == "stop_weather_monitoring":
+            city = arguments.get("city")
+            result = self._handle_stop_monitoring(city)
+
+        elif tool_name == "get_weather_history":
+            city = arguments.get("city")
+            limit = arguments.get("limit", 100)
+            result = self._handle_get_history(city, limit)
 
         else:
             return {
