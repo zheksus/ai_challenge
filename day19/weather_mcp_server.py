@@ -5,6 +5,7 @@ MCP-сервер для погоды.
 """
 
 import json
+import os
 import uuid
 import sqlite3
 import threading
@@ -149,6 +150,57 @@ class WeatherMCPServer:
                             "maximum": 1000
                         }
                     }
+                }
+            ),
+            MCPTool(
+                name="get_weather_recommendation",
+                description="Дать рекомендацию по одежде на основе погоды в городе (куртка, зонт)",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "city": {
+                            "type": "string",
+                            "description": "Название города"
+                        },
+                        "units": {
+                            "type": "string",
+                            "enum": ["metric", "imperial"],
+                            "description": "Единицы измерения",
+                            "default": "metric"
+                        }
+                    },
+                    "required": ["city"]
+                }
+            ),
+            MCPTool(
+                name="save_weather_report",
+                description="Сохранить отчёт о погоде в файл (включает текущую погоду, прогноз и рекомендацию)",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "filename": {
+                            "type": "string",
+                            "description": "Имя файла для сохранения (будет создан в рабочей папке сервера)"
+                        },
+                        "city": {
+                            "type": "string",
+                            "description": "Название города"
+                        },
+                        "days": {
+                            "type": "integer",
+                            "description": "Количество дней прогноза",
+                            "default": 3,
+                            "minimum": 1,
+                            "maximum": 7
+                        },
+                        "units": {
+                            "type": "string",
+                            "enum": ["metric", "imperial"],
+                            "description": "Единицы измерения",
+                            "default": "metric"
+                        }
+                    },
+                    "required": ["filename", "city"]
                 }
             )
         ]
@@ -617,6 +669,140 @@ class WeatherMCPServer:
             })
         return {"snapshots": snapshots, "total": len(snapshots)}
 
+    def _get_weather_recommendation(self, city: str, units: str = "metric") -> Dict:
+        """Рекомендация по одежде на основе текущей погоды."""
+        weather = self._get_current_weather(city, units)
+        if "error" in weather:
+            return weather
+
+        temp = weather.get("temperature", {}).get("value", 0)
+        condition = weather.get("condition", "").lower()
+        wind = weather.get("wind", {}).get("speed", "N/A")
+
+        try:
+            temp = float(temp)
+        except (TypeError, ValueError):
+            temp = 0
+
+        recommendation = {
+            "city": weather.get("city", city),
+            "temperature": temp,
+            "condition": weather.get("condition", ""),
+            "need_jacket": False,
+            "need_umbrella": False,
+            "details": [],
+            "summary": ""
+        }
+
+        # Температура — рекомендация по куртке
+        if temp < 10:
+            recommendation["need_jacket"] = True
+            recommendation["details"].append(f"Холодно ({temp}°C), нужна куртка")
+        elif temp < 20:
+            recommendation["details"].append(f"Прохладно ({temp}°C), можно лёгкую куртку")
+        else:
+            recommendation["details"].append(f"Тепло ({temp}°C), куртка не нужна")
+
+        # Проверка на дождь
+        rain_keywords = ["дождь", "rain", "ливень", "морось", "drizzle", "гроза", "thunderstorm"]
+        if any(kw in condition for kw in rain_keywords):
+            recommendation["need_umbrella"] = True
+            recommendation["details"].append("Сейчас идёт дождь — возьмите зонт")
+
+        # Ветер
+        try:
+            wind_val = float(wind)
+            if wind_val > 30:
+                recommendation["details"].append(f"Сильный ветер ({wind_val} ед.) — ветровка не помешает")
+        except (TypeError, ValueError):
+            pass
+
+        # Формируем краткую сводку
+        parts = []
+        if recommendation["need_jacket"]:
+            parts.append("нужна куртка 🧥")
+        elif temp < 20:
+            parts.append("лёгкая куртка пригодится")
+        else:
+            parts.append("куртка не нужна")
+
+        if recommendation["need_umbrella"]:
+            parts.append("нужен зонт ☂️")
+
+        recommendation["summary"] = f"{recommendation['city']}: {', '.join(parts)}" if parts else \
+            f"{recommendation['city']}: погода комфортная, ничего особенного не нужно"
+
+        return recommendation
+
+    def _save_weather_report(self, filename: str, city: str, days: int = 3, units: str = "metric") -> Dict:
+        """Форматированный отчёт о погоде в файл."""
+        # Защита от path traversal
+        safe_name = os.path.basename(filename)
+        if not safe_name:
+            return {"error": "Некорректное имя файла"}
+        filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), safe_name)
+
+        # Собираем данные
+        weather = self._get_current_weather(city, units)
+        if "error" in weather:
+            return {"error": f"Не удалось получить погоду: {weather['error']}"}
+
+        forecast = self._get_weather_forecast(city, days, units)
+        recommendation = self._get_weather_recommendation(city, units)
+
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        lines = []
+        lines.append("=" * 55)
+        lines.append(f"  ОТЧЁТ О ПОГОДЕ — {weather.get('city', city).upper()}")
+        lines.append(f"  Сформирован: {now}")
+        lines.append("=" * 55)
+        lines.append("")
+
+        lines.append("--- ТЕКУЩАЯ ПОГОДА ---")
+        lines.append(f"  Температура: {weather.get('temperature', {}).get('value', 'N/A')}"
+                     f"{weather.get('temperature', {}).get('units', '')}")
+        lines.append(f"  Состояние: {weather.get('condition', 'N/A')}")
+        lines.append(f"  Влажность: {weather.get('humidity', 'N/A')}")
+        wind = weather.get('wind', {})
+        lines.append(f"  Ветер: {wind.get('speed', 'N/A')} {wind.get('units', '')}")
+        lines.append("")
+
+        if "forecast" in forecast:
+            lines.append("--- ПРОГНОЗ ---")
+            for day in forecast["forecast"]:
+                max_t = day.get("max_temperature", {})
+                min_t = day.get("min_temperature", {})
+                lines.append(f"  {day.get('date', 'N/A')}: "
+                             f"{min_t.get('value', 'N/A')}…{max_t.get('value', 'N/A')}"
+                             f"{max_t.get('units', '')}, {day.get('condition', 'N/A')}")
+            lines.append("")
+
+        lines.append("--- РЕКОМЕНДАЦИЯ ---")
+        rec = recommendation
+        for detail in rec.get("details", []):
+            lines.append(f"  • {detail}")
+        lines.append("")
+        lines.append(f"  Итого: {rec.get('summary', 'N/A')}")
+        lines.append("")
+
+        lines.append("=" * 55)
+        lines.append("  Отчёт сгенерирован Weather MCP Server")
+        lines.append("=" * 55)
+
+        content = "\n".join(lines)
+
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(content)
+            return {
+                "message": f"Отчёт сохранён: {safe_name}",
+                "path": filepath,
+                "size_chars": len(content),
+                "preview": "\n".join(content.split("\n")[:5])
+            }
+        except Exception as e:
+            return {"error": f"Ошибка записи файла: {str(e)}"}
+
     def _handle_tools_list(self, session_id: str, request_id: int) -> Dict:
         """
         Обработка метода tools/list.
@@ -669,6 +855,18 @@ class WeatherMCPServer:
             city = arguments.get("city")
             limit = arguments.get("limit", 100)
             result = self._handle_get_history(city, limit)
+
+        elif tool_name == "get_weather_recommendation":
+            city = arguments.get("city")
+            units = arguments.get("units", "metric")
+            result = self._get_weather_recommendation(city, units)
+
+        elif tool_name == "save_weather_report":
+            filename = arguments.get("filename")
+            city = arguments.get("city")
+            days = arguments.get("days", 3)
+            units = arguments.get("units", "metric")
+            result = self._save_weather_report(filename, city, days, units)
 
         else:
             return {

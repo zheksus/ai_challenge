@@ -751,11 +751,18 @@ class MemoryAwareAgent:
             reqs = t.get("inputSchema", {}).get("required", [])
             lines.append(f"- {name}({params}) — {desc}. Обязательно: {', '.join(reqs)}")
         lines.append("")
-        lines.append("Чтобы вызвать инструмент, напиши на ОТДЕЛЬНОЙ СТРОКЕ:")
-        lines.append("[MCP:имя_инструмента key=value key2=value2]")
-        lines.append("Например: [MCP:get_current_weather city=Moscow]")
+        lines.append("Ты можешь вызывать НЕСКОЛЬКО инструментов в одном ответе — просто пиши")
+        lines.append("каждый [MCP:...] на отдельной строке.")
+        lines.append("")
+        lines.append("Пример цепочки (всё в одном ответе):")
+        lines.append("  [MCP:get_current_weather city=Moscow]")
+        lines.append("  [MCP:get_weather_forecast city=Moscow days=3]")
+        lines.append("  [MCP:get_weather_recommendation city=Moscow]")
+        lines.append("  [MCP:save_weather_report filename=moscow_report.txt city=Moscow]")
+        lines.append("")
         lines.append("Параметры разделяются пробелами или запятыми.")
-        lines.append("После вызова инструмента ты получишь результат и сможешь дать ответ пользователю.")
+        lines.append("Если данных для ответа не хватает — вызывай дополнительные инструменты.")
+        lines.append("Когда данных достаточно — дай ответ пользователю без [MCP:...] вызовов.")
         return "\n".join(lines)
 
     def _parse_mcp_args(self, args_str: str, schema: dict) -> dict:
@@ -790,18 +797,19 @@ class MemoryAwareAgent:
             tool = next((t for t in self.mcp_tools if t["name"] == name), None)
             if not tool:
                 results.append({"tool": name, "error": f"Unknown tool: {name}"})
+                print(f"⚠️ [MCP] Unknown tool: {name}")
                 continue
             schema = tool.get("inputSchema", {})
             args = self._parse_mcp_args(args_str, schema)
             for k, v in schema.get("properties", {}).items():
                 if k not in args and "default" in v:
                     args[k] = v["default"]
-            print(f"\n🔧 [MCP] → {name}({json.dumps(args, ensure_ascii=False)})")
+            print(f"\n  ▶️ [MCP] {name}({json.dumps(args, ensure_ascii=False)}) ... ", end="")
             result = self.mcp.call_tool(name, args)
             if "error" in result:
-                print(f"❌ [MCP] Error: {result['error']}")
+                print(f"❌ Error: {result['error']}")
             else:
-                print(f"✅ [MCP] Result received")
+                print(f"✅ OK")
             results.append({"tool": name, "args": args, "result": result})
         return results
 
@@ -1021,25 +1029,30 @@ class MemoryAwareAgent:
                 final_answer = answer
                 break
 
-            # Есть MCP — показываем промежуточный ответ и выполняем
-            print(f"\n💬 [LLM Round {iteration}] Промежуточный ответ:")
-            print(answer)
-            print()
+            # Есть MCP — выводим промежуточный ответ
+            clean_text = re.sub(r'\[MCP:\w+\s*.*?\]\s*', '', answer).strip()
+            if clean_text:
+                print(f"\n💬 [LLM Round {iteration}] Промежуточный ответ:")
+                print(clean_text)
+                print()
 
             # Добавляем результаты MCP в контекст для следующего раунда
             for res in mcp_results:
                 if "error" in res:
-                    result_text = f"[ОШИБКА MCP: {res['tool']}] {res['error']}"
+                    result_text = f"[РЕЗУЛЬТАТ MCP: {res['tool']}]\n❌ Ошибка: {res['error']}"
+                    print(f"❌ [MCP] {res['tool']} Error: {res['error']}")
                 else:
                     formatted = json.dumps(res["result"], ensure_ascii=False, indent=2)
                     result_text = f"[РЕЗУЛЬТАТ MCP: {res['tool']}]\n{formatted}"
+                    print(f"✅ [MCP] {res['tool']} → OK")
                 context.append({"role": "user", "content": result_text})
 
-            # Добавляем подсказку для следующего раунда
+            # Спрашиваем LLM, нужны ли ещё данные
             context.append({
                 "role": "user",
-                "content": "Данные получены. Теперь сформулируй ответ пользователю на русском языке, "
-                           "используя эти данные. НЕ вызывай MCP повторно."
+                "content": "Данные выше получены с MCP-сервера. Если для ответа пользователю "
+                           "нужны ещё данные — вызови дополнительные [MCP:...] инструменты. "
+                           "Если данных достаточно — просто дай ответ пользователю."
             })
 
         if final_answer is None:
@@ -1484,9 +1497,8 @@ class MemoryTestCLI:
             except Exception as e:
                 print(f"\n❌ Ошибка: {e}")
 
-
 def main():
-    AUTH_KEY = "Basic MDE5ZTg3NzgtMWZlOS03NjIwLTg2YWUtNzJkZGFmYjE2Zjk5OjBlNWRmOTU5LWJjMDQtNGI4Zi04OWUwLTkwZmE3YWNmNzNhOQ=="
+    AUTH_KEY = "Basic <ваш_base64_ключ>
 
     if AUTH_KEY == "Basic <ваш_base64_ключ>":
         print("⚠️ Укажите ваш ключ авторизации в AUTH_KEY")
