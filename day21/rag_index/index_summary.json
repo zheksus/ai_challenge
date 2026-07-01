@@ -1,0 +1,21 @@
+{
+  "total_documents": 1,
+  "total_chars": 66416,
+  "pages_equivalent": 22,
+  "strategy_fixed": {
+    "file": "fixed_index.json",
+    "chunks": 159,
+    "avg_size": 464
+  },
+  "strategy_structure": {
+    "file": "struct_index.json",
+    "chunks": 65,
+    "avg_size": 1004,
+    "type_distribution": {
+      "preamble": 1,
+      "method": 54,
+      "class": 9,
+      "function": 1
+    }
+  }
+}
